@@ -194,11 +194,11 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
   /* ================== CONFIGURAZIONE: da completare ================== */
   var CONFIG = {
     // Indirizzo dell’app web di Apps Script: finisce con /exec
-    SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbyj8jApPiQX206yIWT3Z_VPP79F0cQrxmqmPZklfiiqV8N60tvZQs5xoi7Aeg1PcNKd/exec',
+    SCRIPT_URL: '',
     // Indirizzo dell’informativa privacy (obbligatorio prima della fiera)
-    LINK_INFORMATIVA: 'https://www.unifi.it/sites/default/files/migrated/documents/informativa_eventi_divulgativi.pdf',
+    LINK_INFORMATIVA: '',
     // Indirizzo della landing page di FLOWRENTIA
-    LINK_LANDING: 'https://flowrentia.lovable.app/'
+    LINK_LANDING: ''
   };
   /* =================================================================== */
 
@@ -235,7 +235,8 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
   var Q3 = { sanzioni: 'Evitare sforamenti e sanzioni', gestione: 'Gestire meglio il trattamento', entrambi: 'Entrambi', nessuno: 'Nessuno dei due' };
 
   var $ = function (id) { return document.getElementById(id); };
-  var KS = 'flw-sessione-v1', KC = 'flw-coda-v1';
+  var KS = 'flw-sessione-v2', KC = 'flw-coda-v1';
+  var DURATA_SESSIONE = 7 * 24 * 3600 * 1000;   // una sessione per dispositivo, valida 7 giorni
   var params = new URLSearchParams(location.search);
   var DEBUG = params.get('debug') === '1';
   if (DEBUG) document.body.classList.add('con-debug');
@@ -271,11 +272,17 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
     return (c === 'presentato' || c === 'autonomo') ? c : 'diretto';
   }
 
-  var S = leggi('sessionStorage', KS);
+  // La sessione è condivisa da tutte le schede aperte sullo stesso telefono: stessa variante,
+  // stesse risposte, un solo evento di apertura. A questionario finito, riaprire la pagina
+  // mostra di nuovo i ringraziamenti invece di avviare una nuova sessione.
+  function sessioneValida(x) {
+    return !!x && x.versione === 2 && typeof x.id === 'string' && (Date.now() - (x.creata || 0)) < DURATA_SESSIONE;
+  }
+  var S = leggi('localStorage', KS);
   var nuova = false;
-  if (!S || S.versione !== 1 || S.completata) {
+  if (!sessioneValida(S)) {
     S = {
-      versione: 1, id: nuovoId(),
+      versione: 2, id: nuovoId(), creata: Date.now(),
       variante: caso() < 0.5 ? 'A' : 'B',
       ordine: caso() < 0.5 ? 'sanzioni>gestione' : 'gestione>sanzioni',
       canale: canaleDalLink(), prova: DEBUG,
@@ -284,7 +291,18 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
     nuova = true;
   }
   if (DEBUG) S.prova = true;
-  function salvaS() { scrivi('sessionStorage', KS, S); }
+  function salvaS() {
+    var x = leggi('localStorage', KS);
+    if (x && x.id !== S.id && sessioneValida(x)) { location.reload(); return; }   // un’altra scheda ha avviato una nuova sessione
+    if (x && x.id === S.id) {
+      // unisco quello che le altre schede hanno già salvato, così nessuna scrittura cancella l’altra
+      Object.keys(x.risposte || {}).forEach(function (k) { if (!(k in S.risposte)) S.risposte[k] = x.risposte[k]; });
+      S.completata = S.completata || !!x.completata;
+      S.contatti = S.contatti || !!x.contatti;
+      S.prova = S.prova || !!x.prova;
+    }
+    scrivi('localStorage', KS, S);
+  }
   salvaS();
 
   /* ---------- Coda degli eventi e invio ---------- */
@@ -377,9 +395,9 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
 
   function vistaDi(s) { return /^q[1-4]$/.test(s) ? 'q' : s; }
 
-  function mostra(s, daStoria) {
+  function mostra(s, daStoria, senzaSalvare) {
     S.schermata = s;
-    salvaS();
+    if (!senzaSalvare) salvaS();
     Object.keys(viste).forEach(function (k) { viste[k].hidden = true; viste[k].classList.remove('enter'); });
     var v = viste[vistaDi(s)];
     if (/^q[1-4]$/.test(s)) disegnaDomanda(s);
@@ -488,6 +506,20 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
     }
   }
 
+  /* ---------- Più schede aperte: restano allineate ---------- */
+  window.addEventListener('storage', function (e) {
+    if (e.key !== KS) return;
+    var x = leggi('localStorage', KS);
+    if (!x || x.id !== S.id) { setTimeout(function () { location.reload(); }, 300); return; }
+    Object.keys(x.risposte || {}).forEach(function (k) { S.risposte[k] = x.risposte[k]; });
+    S.contatti = S.contatti || !!x.contatti;
+    S.prova = S.prova || !!x.prova;
+    if (x.completata && !S.completata) {
+      S.completata = true;
+      mostra('fine', true, true);
+    }
+  });
+
   /* ---------- Storia del browser: il tasto Indietro torna alla domanda precedente ---------- */
   window.addEventListener('popstate', function (e) {
     if (S.completata) { history.pushState({ s: 'fine', sid: S.id }, '', location.href); return; }
@@ -547,15 +579,15 @@ body.con-debug .app{padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))
 
   /* ---------- Modalità di prova ---------- */
   $('debug-invia').addEventListener('click', function () { tentativi = 0; programma(0); });
-  $('debug-nuova').addEventListener('click', function () { cancella('sessionStorage', KS); location.reload(); });
+  $('debug-nuova').addEventListener('click', function () { cancella('localStorage', KS); location.reload(); });
 
   /* ---------- Avvio ---------- */
   $('intro-title').textContent = VARIANTI[S.variante].titolo;
   $('intro-sub').textContent = VARIANTI[S.variante].sotto;
   if (nuova) evento('apertura', 'intro');
-  history.replaceState({ s: S.schermata, sid: S.id }, '', location.href);
-  if (S.schermata === 'fine') S.schermata = 'intro';
-  mostra(S.schermata, true);
+  var partenza = S.completata ? 'fine' : (S.schermata === 'fine' ? 'intro' : S.schermata);
+  history.replaceState({ s: partenza, sid: S.id }, '', location.href);
+  mostra(partenza, true);
   programma(0);
 })();
 </script>
